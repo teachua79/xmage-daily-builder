@@ -1,0 +1,108 @@
+name: Daily XMage Build
+
+permissions:
+  contents: write
+
+on:
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+    # Clone latest XMage source
+    - name: Clone upstream XMage repository
+      run: |
+        git clone https://github.com/magefree/mage.git source
+        echo "Upstream XMage source cloned."
+
+    # Install dependencies
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y perl zip unzip build-essential libarchive-zip-perl cpanminus maven
+        sudo cpanm --notest Archive::Extract Archive::Zip
+
+    # Build XMage
+    - name: Build XMage
+      run: |
+        cd source/Mage
+        chmod +x ../Utils/build-and-package.pl
+        perl ../Utils/build-and-package.pl
+        echo "Build completed."
+
+    # Version + timestamp
+    - name: Prepare version tag
+      id: version
+      run: |
+        TIMESTAMP=$(date -u +"%Y-%m-%d-%H%M")
+        echo "version=daily-$TIMESTAMP" >> $GITHUB_OUTPUT
+        echo "timestamp=$TIMESTAMP" >> $GITHUB_OUTPUT
+
+    # Rename binary ZIP
+    - name: Detect and rename binary ZIP
+      run: |
+        BUNDLE=$(find source -maxdepth 3 -type f -name "*.zip" | grep -Ei 'mage|client' | head -n1)
+        if [ -z "$BUNDLE" ]; then
+          echo "ERROR: XMage binary ZIP not found."
+          exit 1
+        fi
+        cp "$BUNDLE" "xmage-${{ steps.version.outputs.version }}.zip"
+        echo "Binary renamed to xmage-${{ steps.version.outputs.version }}.zip"
+
+    # Create source snapshots
+    - name: Create Source Snapshots
+      run: |
+        # cd source
+        # zip -r "../xmage-source-${{ steps.version.outputs.version }}.zip" . >/dev/null
+        # tar -czf "../xmage-source-${{ steps.version.outputs.version }}.tar.gz" . >/dev/null
+        # echo "Source code snapshots created."
+
+    # Create GitHub Release
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.version.outputs.version }}
+        name: ${{ steps.version.outputs.version }}
+        body: |
+          ### Daily Snapshot Build of XMage
+
+          **Important Notice**  
+          Since this is a daily snapshot, it may contain unfinished features, experimental changes, and instabilities or broken cards. May NOT be suitable for official play.
+
+          Built from the official XMage source code:  
+          https://github.com/magefree/mage
+
+        files: |
+          xmage-${{ steps.version.outputs.version }}.zip
+          # xmage-source-${{ steps.version.outputs.version }}.zip
+          # xmage-source-${{ steps.version.outputs.version }}.tar.gz
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  cleanup:
+    needs: build-and-release
+    runs-on: ubuntu-latest
+
+    steps:
+    # Keep only 100 latest releases
+    - name: Delete old releases (keep 100)
+      uses: dev-drprasad/delete-older-releases@v0.3.3
+      with:
+        keep_latest: 100
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      continue-on-error: true
+
+    # Keep only 100 newest tags
+    - name: Delete old tags (keep 100)
+      run: |
+        TAGS=$(git tag --sort=-creatordate | sed -e '1,100d')
+        for TAG in $TAGS; do
+          if [ -n "$TAG" ]; then
+            git push --delete origin "$TAG" || true
+          fi
+        done
